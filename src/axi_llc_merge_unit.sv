@@ -20,6 +20,7 @@ module axi_llc_merge_unit #(
   /// The struct `cnt_t` has to be defined as follows (done in `axi_llc_top`):
   /// typedef struct packed {
   ///    axi_slv_id_t id;     // AXI ID of the count operation
+  ///    axi_user_t   patid;  // partition ID for per-partition write ordering
   ///    logic        rw;     // 0: read, 1: write
   ///    logic        valid;  // valid, equals enable
   ///  } cnt_t;
@@ -61,6 +62,7 @@ module axi_llc_merge_unit #(
   // count down output towards the miss counters
   // enable cnt_down_o if there is a transfer from the pipeline
   assign cnt_down_o.id    = refill_desc_i.a_x_id;
+  assign cnt_down_o.patid = refill_desc_i.patid;
   assign cnt_down_o.rw    = refill_desc_i.rw;
   assign cnt_down_o.valid = refill_valid_i & refill_ready_o;
 

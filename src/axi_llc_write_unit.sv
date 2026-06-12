@@ -124,7 +124,8 @@ module axi_llc_write_unit #(
 
   // assignment of the write unlock fields, which are not set with the control below
   assign w_unlock_o = '{
-    index:   CachePartition ? desc_q.index_partition : 
+    patid:   desc_q.patid,
+    index:   CachePartition ? desc_q.index_partition :
                               desc_q.a_x_addr[(Cfg.ByteOffsetLength + Cfg.BlockOffsetLength) +: Cfg.IndexLength],
     way_ind: desc_q.way_ind
   };

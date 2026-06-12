@@ -251,7 +251,10 @@ module axi_llc_top #(
   /// Events output, for tracked events see `axi_llc_pkg`.
   ///
   /// When not used, leave open.
-  output axi_llc_pkg::events_t axi_llc_events_o
+  output axi_llc_pkg::events_t axi_llc_events_o,
+  /// Stall-checker measurement window control (simulation only).
+  input  logic sc_ext_start_i,
+  input  logic sc_ext_stop_i
 );
   `include "axi/typedef.svh"
 
@@ -344,12 +347,14 @@ module axi_llc_top #(
   // definitions of the miss counting struct
   typedef struct packed {
     axi_slv_id_t                      id;           // AXI id of the count operation
+    axi_user_t                        patid;        // partition ID for per-partition write ordering
     logic                             rw;           // 0:read, 1:write
     logic                             valid;        // valid, equals enable
   } cnt_t;
 
   // definition of the lock signals
   typedef struct packed {
+    axi_user_t                       patid;         // partition ID for per-partition bloom filter routing
     logic [Cfg.IndexLength-1:0]      index;         // index of lock (cache-line)
     logic [Cfg.SetAssociativity-1:0] way_ind;       // way which is locked
   } lock_t;
@@ -427,6 +432,14 @@ module axi_llc_top #(
   lock_t                r_unlock,     w_unlock;
   logic                 r_unlock_req, w_unlock_req; // Not AXI valid / ready dependency
   logic                 r_unlock_gnt, w_unlock_gnt; // Not AXI valid / ready dependency
+
+  // per-partition round-robin arbiter outputs (after the 4 insertion points)
+  llc_desc_t            arb_miss_desc,  arb_hit_desc;
+  logic                 arb_miss_valid, arb_hit_valid;
+  logic                 arb_miss_ready, arb_hit_ready;
+  llc_desc_t            arb_write_desc,  arb_read_desc;
+  logic                 arb_write_valid, arb_read_valid;
+  logic                 arb_write_ready, arb_read_ready;
 
   // global SPM lock signal
   logic [Cfg.SetAssociativity-1:0] spm_lock;
@@ -702,6 +715,7 @@ endgenerate
     .Cfg               ( Cfg               ),
     .AxiCfg            ( AxiCfg            ),
     .CachePartition    ( CachePartition    ),
+    .MaxPartition      ( MaxPartition      ),
     .RemapHash         ( RemapHash         ),
     .desc_t            ( llc_desc_t        ),
     .lock_t            ( lock_t            ),
@@ -736,6 +750,77 @@ endgenerate
     .bist_valid_o   ( bist_valid   )
   );
 
+  // -----------------------------------------------------------------------
+  // Per-partition round-robin arbiters
+  // -----------------------------------------------------------------------
+  // 1. Miss path: hit_miss → evict_unit
+  axi_llc_partition_arbiter #(
+    .MaxPartition ( MaxPartition ),
+    .FifoDepth    ( 32'd2        ),
+    .desc_t       ( llc_desc_t   )
+  ) i_miss_arb (
+    .clk_i,
+    .rst_ni,
+    .test_i,
+    .desc_i  ( desc           ),
+    .valid_i ( miss_valid      ),
+    .ready_o ( miss_ready      ),
+    .desc_o  ( arb_miss_desc  ),
+    .valid_o ( arb_miss_valid  ),
+    .ready_i ( arb_miss_ready  )
+  );
+
+  // 2. Hit bypass path: hit_miss → merge_unit bypass
+  axi_llc_partition_arbiter #(
+    .MaxPartition ( MaxPartition ),
+    .FifoDepth    ( 32'd2        ),
+    .desc_t       ( llc_desc_t   )
+  ) i_hit_arb (
+    .clk_i,
+    .rst_ni,
+    .test_i,
+    .desc_i  ( desc          ),
+    .valid_i ( hit_valid      ),
+    .ready_o ( hit_ready      ),
+    .desc_o  ( arb_hit_desc  ),
+    .valid_o ( arb_hit_valid  ),
+    .ready_i ( arb_hit_ready  )
+  );
+
+  // 3. Write path: merge_unit → write_unit
+  axi_llc_partition_arbiter #(
+    .MaxPartition ( MaxPartition ),
+    .FifoDepth    ( 32'd2        ),
+    .desc_t       ( llc_desc_t   )
+  ) i_write_arb (
+    .clk_i,
+    .rst_ni,
+    .test_i,
+    .desc_i  ( write_desc       ),
+    .valid_i ( write_desc_valid  ),
+    .ready_o ( write_desc_ready  ),
+    .desc_o  ( arb_write_desc   ),
+    .valid_o ( arb_write_valid   ),
+    .ready_i ( arb_write_ready   )
+  );
+
+  // 4. Read path: merge_unit → read_unit
+  axi_llc_partition_arbiter #(
+    .MaxPartition ( MaxPartition ),
+    .FifoDepth    ( 32'd2        ),
+    .desc_t       ( llc_desc_t   )
+  ) i_read_arb (
+    .clk_i,
+    .rst_ni,
+    .test_i,
+    .desc_i  ( read_desc       ),
+    .valid_i ( read_desc_valid  ),
+    .ready_o ( read_desc_ready  ),
+    .desc_o  ( arb_read_desc   ),
+    .valid_o ( arb_read_valid   ),
+    .ready_i ( arb_read_ready   )
+  );
+
   axi_llc_evict_unit #(
     .Cfg            ( Cfg            ),
     .AxiCfg         ( AxiCfg         ),
@@ -750,9 +835,9 @@ endgenerate
     .clk_i             ( clk_i                                ),
     .rst_ni            ( rst_ni                               ),
     .test_i            ( test_i                               ),
-    .desc_i            ( desc                                 ),
-    .desc_valid_i      ( miss_valid                           ),
-    .desc_ready_o      ( miss_ready                           ),
+    .desc_i            ( arb_miss_desc                        ),
+    .desc_valid_i      ( arb_miss_valid                       ),
+    .desc_ready_o      ( arb_miss_ready                       ),
     .desc_o            ( evict_desc                           ),
     .desc_valid_o      ( evict_desc_valid                     ),
     .desc_ready_i      ( evict_desc_ready                     ),
@@ -812,9 +897,9 @@ endgenerate
   ) i_merge_unit (
     .clk_i,
     .rst_ni,
-    .bypass_desc_i ( desc              ),
-    .bypass_valid_i( hit_valid         ),
-    .bypass_ready_o( hit_ready         ),
+    .bypass_desc_i ( arb_hit_desc      ),
+    .bypass_valid_i( arb_hit_valid     ),
+    .bypass_ready_o( arb_hit_ready     ),
     .refill_desc_i ( refill_desc       ),
     .refill_valid_i( refill_desc_valid ),
     .refill_ready_o( refill_desc_ready ),
@@ -841,9 +926,9 @@ endgenerate
     .clk_i           ( clk_i                                ),
     .rst_ni          ( rst_ni                               ),
     .test_i          ( test_i                               ),
-    .desc_i          ( write_desc                           ),
-    .desc_valid_i    ( write_desc_valid                     ),
-    .desc_ready_o    ( write_desc_ready                     ),
+    .desc_i          ( arb_write_desc                       ),
+    .desc_valid_i    ( arb_write_valid                      ),
+    .desc_ready_o    ( arb_write_ready                      ),
     .w_chan_slv_i    ( to_llc_req.w                         ),
     .w_chan_valid_i  ( to_llc_req.w_valid                   ),
     .w_chan_ready_o  ( to_llc_resp.w_ready                  ),
@@ -872,9 +957,9 @@ endgenerate
     .clk_i           ( clk_i                                ),
     .rst_ni          ( rst_ni                               ),
     .test_i          ( test_i                               ),
-    .desc_i          ( read_desc                            ),
-    .desc_valid_i    ( read_desc_valid                      ),
-    .desc_ready_o    ( read_desc_ready                      ),
+    .desc_i          ( arb_read_desc                        ),
+    .desc_valid_i    ( arb_read_valid                       ),
+    .desc_ready_o    ( arb_read_ready                       ),
     .r_chan_slv_o    ( to_llc_resp.r                        ),
     .r_chan_valid_o  ( to_llc_resp.r_valid                  ),
     .r_chan_ready_i  ( to_llc_req.r_ready                   ),
@@ -1073,6 +1158,69 @@ endgenerate
     r_chan_unit_req:    to_way_valid[axi_llc_pkg::RChanUnit] & to_way_ready[axi_llc_pkg::RChanUnit],
     default: '0
   };
+
+  // SC1: latency at the LLC cache-pipeline input (after bypass demux).
+  stall_checker #(
+    .axi_req_t  ( slv_req_t  ),
+    .axi_resp_t ( slv_resp_t )
+  ) i_llc_slv_sc (
+    .clk_i,
+    .rst_ni,
+    .ext_start_i   ( sc_ext_start_i ),
+    .ext_stop_i    ( sc_ext_stop_i  ),
+    .axi_req_i     ( to_llc_req     ),
+    .axi_resp_i    ( to_llc_resp    ),
+    .ar_max_lat_o  ( /* not connected */ ),
+    .ar_avg_sum_o  ( /* not connected */ ),
+    .ar_avg_cnt_o  ( /* not connected */ ),
+    .ar_overflow_o ( /* not connected */ ),
+    .aw_max_lat_o  ( /* not connected */ ),
+    .aw_avg_sum_o  ( /* not connected */ ),
+    .aw_avg_cnt_o  ( /* not connected */ ),
+    .aw_overflow_o ( /* not connected */ )
+  );
+
+  // SC2: latency on the AXI master port toward DRAM (evictions on AW/B, refills on AR/R).
+  stall_checker #(
+    .axi_req_t  ( slv_req_t  ),
+    .axi_resp_t ( slv_resp_t )
+  ) i_llc_evr_sc (
+    .clk_i,
+    .rst_ni,
+    .ext_start_i   ( sc_ext_start_i ),
+    .ext_stop_i    ( sc_ext_stop_i  ),
+    .axi_req_i     ( from_llc_req   ),
+    .axi_resp_i    ( from_llc_resp  ),
+    .ar_max_lat_o  ( /* not connected */ ),
+    .ar_avg_sum_o  ( /* not connected */ ),
+    .ar_avg_cnt_o  ( /* not connected */ ),
+    .ar_overflow_o ( /* not connected */ ),
+    .aw_max_lat_o  ( /* not connected */ ),
+    .aw_avg_sum_o  ( /* not connected */ ),
+    .aw_avg_cnt_o  ( /* not connected */ ),
+    .aw_overflow_o ( /* not connected */ )
+  );
+
+  // SC3: latency on the bypass path (non-cached or SPM accesses).
+  stall_checker #(
+    .axi_req_t  ( slv_req_t  ),
+    .axi_resp_t ( slv_resp_t )
+  ) i_llc_byp_sc (
+    .clk_i,
+    .rst_ni,
+    .ext_start_i   ( sc_ext_start_i ),
+    .ext_stop_i    ( sc_ext_stop_i  ),
+    .axi_req_i     ( bypass_req     ),
+    .axi_resp_i    ( bypass_resp    ),
+    .ar_max_lat_o  ( /* not connected */ ),
+    .ar_avg_sum_o  ( /* not connected */ ),
+    .ar_avg_cnt_o  ( /* not connected */ ),
+    .ar_overflow_o ( /* not connected */ ),
+    .aw_max_lat_o  ( /* not connected */ ),
+    .aw_avg_sum_o  ( /* not connected */ ),
+    .aw_avg_cnt_o  ( /* not connected */ ),
+    .aw_overflow_o ( /* not connected */ )
+  );
 
 // pragma translate_off
 `ifndef VERILATOR

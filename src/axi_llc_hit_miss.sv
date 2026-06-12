@@ -33,6 +33,9 @@ module axi_llc_hit_miss #(
   parameter axi_llc_pkg::llc_axi_cfg_t AxiCfg         = axi_llc_pkg::llc_axi_cfg_t'{default: '0},
   /// Cache partitioning enabling parameter
   parameter logic                      CachePartition = 1,
+  /// Maximum number of partitions (same as top-level MaxPartition).
+  /// Used to size per-partition write counters in the miss counter unit.
+  parameter int unsigned               MaxPartition   = 32'd0,
   /// Index remapping hash function used in cache partitioning
   parameter axi_llc_pkg::algorithm_e   RemapHash      = axi_llc_pkg::Modulo,
   /// LLC descriptor type
@@ -48,6 +51,7 @@ module axi_llc_hit_miss #(
   ///
   /// typedef struct packed {
   ///   axi_slv_id_t id;    // Axi id of the count operation
+  ///   axi_user_t   patid; // partition ID for per-partition write ordering
   ///   logic        rw;    // 0:read, 1:write
   ///   logic        valid; // valid, equals enable
   /// } cnt_t;
@@ -96,12 +100,14 @@ module axi_llc_hit_miss #(
   output logic     bist_valid_o
 );
   `include "common_cells/registers.svh"
-  localparam int unsigned IndexBase = Cfg.ByteOffsetLength + Cfg.BlockOffsetLength;
-  localparam int unsigned TagBase   = Cfg.ByteOffsetLength + Cfg.BlockOffsetLength +
-                                      Cfg.IndexLength;
+  localparam int unsigned IndexBase    = Cfg.ByteOffsetLength + Cfg.BlockOffsetLength;
+  localparam int unsigned TagBase      = Cfg.ByteOffsetLength + Cfg.BlockOffsetLength +
+                                         Cfg.IndexLength;
+  localparam int unsigned NoPartitions = (MaxPartition == 0) ? 1 : (MaxPartition + 1);
+  localparam int unsigned PIDWidth     = (NoPartitions <= 1) ? 1 : $clog2(NoPartitions);
 
   // Type definitions for the requests and responses to/from the tag storage
-      // typedef logic [Cfg.SetAssociativity-1:0] way_ind_t;
+  // typedef logic [Cfg.SetAssociativity-1:0] way_ind_t;
   typedef logic [Cfg.IndexLength-1:0]      index_t;
   typedef logic [Cfg.TagLength-1:0]        tag_t;
 
@@ -143,6 +149,9 @@ module axi_llc_hit_miss #(
   // lock signal
   lock_t lock;
   logic  lock_req, locked;
+  logic [NoPartitions-1:0] locked_part;
+  logic [NoPartitions-1:0] w_unlock_gnt_part;
+  logic [NoPartitions-1:0] r_unlock_gnt_part;
   // up counting signal
   cnt_t  cnt_up;
   logic  cnt_stall;
@@ -395,13 +404,15 @@ module axi_llc_hit_miss #(
 
   // inputs to the miss counter unit
   assign cnt_up.id    = desc_o.a_x_id;
+  assign cnt_up.patid = desc_o.patid;
   assign cnt_up.rw    = desc_o.rw;
   // count up if a transfer happens on the miss pipeline
   assign cnt_up.valid = ~desc_o.flush & miss_valid_o & miss_ready_i;
 
   axi_llc_miss_counters #(
-    .Cfg     ( Cfg    ),
-    .cnt_t   ( cnt_t  )
+    .Cfg          ( Cfg          ),
+    .MaxPartition ( MaxPartition ),
+    .cnt_t        ( cnt_t        )
   ) i_miss_counters (
     .clk_i      (      clk_i ),
     .rst_ni     (     rst_ni ),
@@ -412,32 +423,41 @@ module axi_llc_hit_miss #(
   );
 
   // inputs to the lock box
-  // Cache-Partition: the lock signal also needs to used the new index
+  // Cache-Partition: the lock signal also needs to use the new index
   assign lock = '{
-    index:   CachePartition ? desc_o.index_partition : 
+    patid:   desc_o.patid,
+    index:   CachePartition ? desc_o.index_partition :
                               desc_o.a_x_addr[(Cfg.ByteOffsetLength + Cfg.BlockOffsetLength)+:Cfg.IndexLength],
     way_ind: desc_o.way_ind
   };
-  // Lock it if a transfer happens on ether channel and no flush!
+  // Lock it if a transfer happens on either channel and no flush!
   assign lock_req = ~desc_o.flush & ((miss_valid_o & miss_ready_i) | (hit_valid_o & hit_ready_i));
 
-  axi_llc_lock_box_bloom #(
-    .Cfg       ( Cfg    ),
-    .lock_t    ( lock_t )
-  ) i_lock_box_bloom (
-    .clk_i          ( clk_i      ),  // Clock
-    .rst_ni         ( rst_ni     ),  // Asynchronous reset active low
-    .test_i         ( test_i     ),
-    .lock_i         ( lock       ),
-    .lock_req_i     ( lock_req   ),
-    .locked_o       ( locked     ),
-    .w_unlock_i,
-    .w_unlock_req_i,
-    .w_unlock_gnt_o,
-    .r_unlock_i,
-    .r_unlock_req_i,
-    .r_unlock_gnt_o
-  );
+  // Per-partition locked signal: only check the bloom filter for the current descriptor's partition.
+  assign locked        = locked_part[desc_o.patid[0+:PIDWidth]];
+  // Route grants from the partition-specific filter that received the unlock request.
+  assign w_unlock_gnt_o = w_unlock_gnt_part[w_unlock_i.patid[0+:PIDWidth]];
+  assign r_unlock_gnt_o = r_unlock_gnt_part[r_unlock_i.patid[0+:PIDWidth]];
+
+  for (genvar p = 0; unsigned'(p) < NoPartitions; p++) begin : gen_lock_box
+    axi_llc_lock_box_bloom #(
+      .Cfg    ( Cfg    ),
+      .lock_t ( lock_t )
+    ) i_lock_box_bloom (
+      .clk_i,
+      .rst_ni,
+      .test_i,
+      .lock_i         ( lock                                                                  ),
+      .lock_req_i     ( lock_req & (lock.patid[0+:PIDWidth] == PIDWidth'(p))                 ),
+      .locked_o       ( locked_part[p]                                                        ),
+      .w_unlock_i     ( w_unlock_i                                                            ),
+      .w_unlock_req_i ( w_unlock_req_i & (w_unlock_i.patid[0+:PIDWidth] == PIDWidth'(p))     ),
+      .w_unlock_gnt_o ( w_unlock_gnt_part[p]                                                  ),
+      .r_unlock_i     ( r_unlock_i                                                            ),
+      .r_unlock_req_i ( r_unlock_req_i & (r_unlock_i.patid[0+:PIDWidth] == PIDWidth'(p))     ),
+      .r_unlock_gnt_o ( r_unlock_gnt_part[p]                                                  )
+    );
+  end
 
 generate
   if (CachePartition && (RemapHash == (axi_llc_pkg::TruncDual))) begin

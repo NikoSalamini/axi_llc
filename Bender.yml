@@ -33,6 +33,7 @@ sources:
   - src/axi_llc_burst_cutter.sv
   - src/axi_llc_data_way.sv
   - src/axi_llc_merge_unit.sv
+  - src/axi_llc_partition_arbiter.sv
   - src/axi_llc_read_unit.sv
   - src/axi_llc_reg_pkg.sv
   - src/axi_llc_reg_top.sv

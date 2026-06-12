@@ -113,8 +113,8 @@ module axi_llc_read_unit #(
 
   // unlock assignment
   assign r_unlock_o = '{
-    // index:   desc_q.index_partition,
-    index:   CachePartition ? desc_q.index_partition : 
+    patid:   desc_q.patid,
+    index:   CachePartition ? desc_q.index_partition :
                               desc_q.a_x_addr[(Cfg.ByteOffsetLength + Cfg.BlockOffsetLength)+:Cfg.IndexLength],
     way_ind: desc_q.way_ind
   };

@@ -232,7 +232,10 @@ module axi_llc_reg_wrap #(
   /// Events output, for tracked events see `axi_llc_pkg`.
   ///
   /// When not used, leave open.
-  output axi_llc_pkg::events_t axi_llc_events_o
+  output axi_llc_pkg::events_t axi_llc_events_o,
+  /// Stall-checker measurement window control (simulation only).
+  input  logic sc_ext_start_i,
+  input  logic sc_ext_stop_i
 );
 
   localparam int unsigned RegWidth = 64;
@@ -309,7 +312,9 @@ module axi_llc_reg_wrap #(
     .cached_start_addr_i,
     .cached_end_addr_i,
     .spm_start_addr_i,
-    .axi_llc_events_o
+    .axi_llc_events_o,
+    .sc_ext_start_i,
+    .sc_ext_stop_i
   );
 
 endmodule
