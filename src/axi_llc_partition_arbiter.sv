@@ -55,7 +55,7 @@ module axi_llc_partition_arbiter #(
   // Per-partition FIFOs
   for (genvar p = 0; unsigned'(p) < NoPartitions; p++) begin : gen_part_fifo
     stream_fifo #(
-      .FALL_THROUGH ( 1'b0      ),
+      .FALL_THROUGH ( 1'b1      ),
       .DEPTH        ( FifoDepth ),
       .T            ( desc_t    )
     ) i_part_fifo (
