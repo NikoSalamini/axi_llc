@@ -6,14 +6,14 @@
 // Date:   12.06.2019
 
 /// This module counts if there are any descriptors of a given transaction ID
-/// in the miss pipeline, and combinationally counts up of down the respective ID
-/// of the cnt_t struct matches. There is a counter for all id's and one for writes
-/// as all writes have to be transferred in order within the same partition.
-/// When MaxPartition > 0, a separate write counter is maintained per partition so
-/// that writes from different partitions do not unnecessarily stall each other.
-/// Likewise, the per-id read/miss counters are also replicated per partition, so
-/// that two descriptors with the same lower AXI ID bits but from different
-/// partitions never share a counter and never stall each other.
+/// in the miss pipeline, and combinationally counts up or down the respective ID
+/// of the cnt_t struct matches. There is a counter for all IDs and one for writes
+/// as all writes have to be transferred in order.
+///
+/// Behaviour is controlled by the package-level feature flags:
+///   axi_llc_pkg::EnPartWriteCounter — replicates the write counter per partition
+///   axi_llc_pkg::EnPartReadCounter  — replicates the per-ID read counters per partition
+/// Both flags are overridden to 0 (single-counter) when MaxPartition == 0.
 module axi_llc_miss_counters #(
   /// Static LLC parameter configuration.
   parameter axi_llc_pkg::llc_cfg_t Cfg = axi_llc_pkg::llc_cfg_t'{default: '0},
@@ -42,79 +42,76 @@ module axi_llc_miss_counters #(
   /// One of the counters is overflowing, stall descriptor!
   output logic stall_o
 );
-  localparam int unsigned NoCounters   = 2**axi_llc_pkg::UseIdBits;
-  // Number of per-partition write counters: at least 1 (covers the disabled/single case).
-  localparam int unsigned NoPartitions = (MaxPartition == 0) ? 1 : (MaxPartition + 1);
-  // Minimum 1 bit so bit-selects on patid are always legal.
-  localparam int unsigned PIDWidth     = (NoPartitions <= 1) ? 1 : $clog2(NoPartitions);
+  localparam int unsigned NoCounters = 2**axi_llc_pkg::UseIdBits;
 
-  // stall from the per-partition, per-id counters
-  logic [NoPartitions-1:0][NoCounters-1:0] stall_id;
-  // stall from per-partition write counters
-  logic [NoPartitions-1:0] stall_w;
+  // Effective partition counts for each counter type.
+  // When a patch flag is 0 (or MaxPartition==0), NoPartsX=1 collapses the array
+  // to a single slot, reproducing the original single-counter behaviour exactly.
+  localparam int unsigned NoPartsR  =
+    (MaxPartition == 0 || !axi_llc_pkg::EnPartReadCounter)  ? 1 : (MaxPartition + 1);
+  localparam int unsigned NoPartsW  =
+    (MaxPartition == 0 || !axi_llc_pkg::EnPartWriteCounter) ? 1 : (MaxPartition + 1);
+  localparam int unsigned PIDWidthR = (NoPartsR <= 1) ? 1 : $clog2(NoPartsR);
+  localparam int unsigned PIDWidthW = (NoPartsW <= 1) ? 1 : $clog2(NoPartsW);
 
-  logic [NoPartitions-1:0][NoCounters-1:0] en;
-  logic [NoPartitions-1:0][NoCounters-1:0] down;
+  // Effective partition IDs used for counter indexing.
+  // Forced to 0 when the corresponding patch is disabled so that everything
+  // maps to slot [0], giving single-counter semantics.
+  logic [PIDWidthR-1:0] up_patid_r, dn_patid_r;
+  logic [PIDWidthW-1:0] up_patid_w, dn_patid_w;
+  assign up_patid_r = (NoPartsR == 1) ? '0 : cnt_up_i.patid[0+:PIDWidthR];
+  assign dn_patid_r = (NoPartsR == 1) ? '0 : cnt_down_i.patid[0+:PIDWidthR];
+  assign up_patid_w = (NoPartsW == 1) ? '0 : cnt_up_i.patid[0+:PIDWidthW];
+  assign dn_patid_w = (NoPartsW == 1) ? '0 : cnt_down_i.patid[0+:PIDWidthW];
 
-  // outputs of the per-partition, per-id counters
-  logic [NoPartitions-1:0][NoCounters-1:0][axi_llc_pkg::MissCntWidth-1:0] q_miss;
+  // Per-ID read-miss counters (replicated per partition when EnPartReadCounter=1)
+  logic [NoPartsR-1:0][NoCounters-1:0] stall_id;
+  logic [NoPartsR-1:0][NoCounters-1:0] en;
+  logic [NoPartsR-1:0][NoCounters-1:0] down;
+  logic [NoPartsR-1:0][NoCounters-1:0][axi_llc_pkg::MissCntWidth-1:0] q_miss;
 
-  // per-partition write counter outputs and controls
-  logic [NoPartitions-1:0][axi_llc_pkg::MissCntMaxWWidth-1:0] q_write;
-  logic [NoPartitions-1:0] en_w;
-  logic [NoPartitions-1:0] down_w;
+  // Write-miss counters (replicated per partition when EnPartWriteCounter=1)
+  logic [NoPartsW-1:0] stall_w;
+  logic [NoPartsW-1:0] en_w;
+  logic [NoPartsW-1:0] down_w;
+  logic [NoPartsW-1:0][axi_llc_pkg::MissCntMaxWWidth-1:0] q_write;
 
   assign stall_o = |stall_id | |stall_w;
 
   always_comb begin : proc_control
     to_miss_o = 1'b0;
-    for (int unsigned p = 0; p < NoPartitions; p++) begin
+    for (int unsigned p = 0; p < NoPartsR; p++) begin
       for (int unsigned i = 0; i < NoCounters; i++) begin
-        // default assignments
         en[p][i]   = 1'b0;
         down[p][i] = 1'b0;
-        // we should count up
         if ((cnt_up_i.id[0+:axi_llc_pkg::UseIdBits] == i) &&
-            (cnt_up_i.patid[0+:PIDWidth]            == PIDWidth'(p)) && cnt_up_i.valid) begin
-          en[p][i]   = 1'b1;
-        end
-
-        // we should count down, or do nothing, if we are already counting up
+            (up_patid_r == PIDWidthR'(p)) && cnt_up_i.valid)
+          en[p][i] = 1'b1;
         if ((cnt_down_i.id[0+:axi_llc_pkg::UseIdBits] == i) &&
-            (cnt_down_i.patid[0+:PIDWidth]            == PIDWidth'(p)) && cnt_down_i.valid) begin
-          if (en[p][i] == 1'b1) begin
-            en[p][i]   = 1'b0;
-          end else begin
-            en[p][i]   = 1'b1;
-            down[p][i] = 1'b1;
-          end
+            (dn_patid_r == PIDWidthR'(p)) && cnt_down_i.valid) begin
+          if (en[p][i]) en[p][i] = 1'b0;
+          else begin en[p][i] = 1'b1; down[p][i] = 1'b1; end
         end
-        // do we have to send the descriptor to the miss pipeline?
-        if ((cnt_up_i.id[0+:axi_llc_pkg::UseIdBits] == i) &&
-            (cnt_up_i.patid[0+:PIDWidth]            == PIDWidth'(p))) begin
-          // first check the counter mapped to this partition's id
+        // to_miss: check this partition's ID counter
+        if ((cnt_up_i.id[0+:axi_llc_pkg::UseIdBits] == i) && (up_patid_r == PIDWidthR'(p)))
           to_miss_o = |q_miss[p][i];
-          // if it is a write also check the per-partition write counter for this partition
-          if (cnt_up_i.rw) begin
-            to_miss_o = to_miss_o || (|q_write[p]);
-          end
-        end
       end
     end
+    // to_miss: additionally check write counter for the requesting partition
+    if (cnt_up_i.rw)
+      to_miss_o = to_miss_o || (|q_write[up_patid_w]);
   end
 
-  // Per-partition write counter control.
-  // For each partition p: enable when exactly one of (up-write-for-p, down-write-for-p) is active;
-  // count down when the up side is not active for that partition.
-  for (genvar p = 0; unsigned'(p) < NoPartitions; p++) begin : gen_wpart_ctrl
-    assign en_w[p]   =
-      (cnt_up_i.rw   & cnt_up_i.valid   & (cnt_up_i.patid[0+:PIDWidth]   == PIDWidth'(p))) ^
-      (cnt_down_i.rw & cnt_down_i.valid & (cnt_down_i.patid[0+:PIDWidth] == PIDWidth'(p)));
+  // Write counter control: XOR of (up-write-for-p) and (down-write-for-p)
+  for (genvar p = 0; unsigned'(p) < NoPartsW; p++) begin : gen_wpart_ctrl
+    assign en_w[p] =
+      (cnt_up_i.rw   & cnt_up_i.valid   & (up_patid_w == PIDWidthW'(p))) ^
+      (cnt_down_i.rw & cnt_down_i.valid & (dn_patid_w == PIDWidthW'(p)));
     assign down_w[p] =
-      ~(cnt_up_i.rw & cnt_up_i.valid & (cnt_up_i.patid[0+:PIDWidth] == PIDWidth'(p)));
+      ~(cnt_up_i.rw & cnt_up_i.valid & (up_patid_w == PIDWidthW'(p)));
   end
 
-  for (genvar p = 0; unsigned'(p) < NoPartitions; p++) begin : gen_ppart_miss_counters
+  for (genvar p = 0; unsigned'(p) < NoPartsR; p++) begin : gen_ppart_miss_counters
     for (genvar j = 0; unsigned'(j) < NoCounters; j++) begin : gen_cmiss_counters
       counter #(
         .WIDTH      ( axi_llc_pkg::MissCntWidth )
@@ -132,19 +129,19 @@ module axi_llc_miss_counters #(
     end
   end
 
-  for (genvar p = 0; unsigned'(p) < NoPartitions; p++) begin : gen_write_counters
+  for (genvar p = 0; unsigned'(p) < NoPartsW; p++) begin : gen_write_counters
     counter #(
       .WIDTH      ( axi_llc_pkg::MissCntMaxWWidth )
     ) i_miss_w_cnt (
-      .clk_i      ( clk_i        ),
-      .rst_ni     ( rst_ni       ),
-      .clear_i    ( '0           ),
-      .en_i       ( en_w[p]      ),
-      .load_i     ( '0           ),
-      .down_i     ( down_w[p]    ),
-      .d_i        ( '0           ),
-      .q_o        ( q_write[p]   ),
-      .overflow_o ( stall_w[p]   )
+      .clk_i      ( clk_i      ),
+      .rst_ni     ( rst_ni     ),
+      .clear_i    ( '0         ),
+      .en_i       ( en_w[p]    ),
+      .load_i     ( '0         ),
+      .down_i     ( down_w[p]  ),
+      .d_i        ( '0         ),
+      .q_o        ( q_write[p] ),
+      .overflow_o ( stall_w[p] )
     );
   end
 endmodule

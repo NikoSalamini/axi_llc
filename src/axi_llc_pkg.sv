@@ -234,6 +234,38 @@ package axi_llc_pkg;
   /// * Set this parameter to the slave port AXI ID width if you want one counter for each AXI ID.
   parameter int unsigned UseIdBits        = 32'd4;
 
+  // ---------------------------------------------------------------------------
+  // Partitioning patch feature flags
+  // Set a flag to 1'b0 to fall back to the pre-patch (single-resource) behaviour.
+  // All flags are ignored when MaxPartition == 0 (partitioning disabled at top level).
+  // ---------------------------------------------------------------------------
+
+  /// Patch 1 — Per-partition write-miss counter.
+  /// When 1: each partition has its own write-miss counter so a write miss in
+  ///         partition P does not stall write hits in partition Q.
+  /// When 0: single shared write counter (original behaviour).
+  parameter bit EnPartWriteCounter = 1'b0;
+
+  /// Patch 2 — Per-partition bloom filter (lock-box).
+  /// When 1: each partition has its own counting bloom filter; the locked signal
+  ///         only reflects in-flight lines of the requesting descriptor's partition.
+  /// When 0: single shared bloom filter (original behaviour).
+  parameter bit EnPartBloomFilter  = 1'b1;
+
+  /// Patch 3 — Per-partition round-robin arbiters at the four LLC funnel points
+  ///            (miss path, hit bypass, write unit, read unit).
+  /// When 1: axi_llc_partition_arbiter instances are inserted; descriptors from
+  ///         different partitions are served in round-robin order.
+  /// When 0: direct connections at every funnel point (original FCFS behaviour).
+  parameter bit EnPartArbiter      = 1'b0;
+
+  /// Patch 4 — Per-partition per-ID read-miss counter.
+  /// When 1: the 2^UseIdBits ID counters are replicated per partition so that
+  ///         two transactions with the same lower ID bits but from different
+  ///         partitions never share a counter.
+  /// When 0: single flat array of 2^UseIdBits counters (original behaviour).
+  parameter bit EnPartReadCounter  = 1'b0;
+
   /// This adds a spill register in the response path of the tag stroage unit.
   /// This should be used to achieve good timing characteristics in synthsis as the longest
   /// path in the design comes out of the tag storage macros.

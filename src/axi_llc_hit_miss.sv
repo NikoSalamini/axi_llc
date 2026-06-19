@@ -100,11 +100,15 @@ module axi_llc_hit_miss #(
   output logic     bist_valid_o
 );
   `include "common_cells/registers.svh"
-  localparam int unsigned IndexBase    = Cfg.ByteOffsetLength + Cfg.BlockOffsetLength;
-  localparam int unsigned TagBase      = Cfg.ByteOffsetLength + Cfg.BlockOffsetLength +
-                                         Cfg.IndexLength;
-  localparam int unsigned NoPartitions = (MaxPartition == 0) ? 1 : (MaxPartition + 1);
-  localparam int unsigned PIDWidth     = (NoPartitions <= 1) ? 1 : $clog2(NoPartitions);
+  localparam int unsigned IndexBase   = Cfg.ByteOffsetLength + Cfg.BlockOffsetLength;
+  localparam int unsigned TagBase     = Cfg.ByteOffsetLength + Cfg.BlockOffsetLength +
+                                        Cfg.IndexLength;
+  // Effective partition count for the bloom filter.
+  // Collapses to 1 (single shared filter = original behaviour) when
+  // EnPartBloomFilter=0 or MaxPartition=0.
+  localparam int unsigned NoPartsBF  =
+    (MaxPartition == 0 || !axi_llc_pkg::EnPartBloomFilter) ? 1 : (MaxPartition + 1);
+  localparam int unsigned PIDWidthBF = (NoPartsBF <= 1) ? 1 : $clog2(NoPartsBF);
 
   // Type definitions for the requests and responses to/from the tag storage
   // typedef logic [Cfg.SetAssociativity-1:0] way_ind_t;
@@ -149,9 +153,12 @@ module axi_llc_hit_miss #(
   // lock signal
   lock_t lock;
   logic  lock_req, locked;
-  logic [NoPartitions-1:0] locked_part;
-  logic [NoPartitions-1:0] w_unlock_gnt_part;
-  logic [NoPartitions-1:0] r_unlock_gnt_part;
+  logic [NoPartsBF-1:0] locked_part;
+  logic [NoPartsBF-1:0] w_unlock_gnt_part;
+  logic [NoPartsBF-1:0] r_unlock_gnt_part;
+  // Effective partition IDs for bloom-filter routing.
+  // Forced to 0 when EnPartBloomFilter=0 so all requests map to filter[0].
+  logic [PIDWidthBF-1:0] lock_patid_bf, w_uf_patid_bf, r_uf_patid_bf, desc_patid_bf;
   // up counting signal
   cnt_t  cnt_up;
   logic  cnt_stall;
@@ -433,13 +440,19 @@ module axi_llc_hit_miss #(
   // Lock it if a transfer happens on either channel and no flush!
   assign lock_req = ~desc_o.flush & ((miss_valid_o & miss_ready_i) | (hit_valid_o & hit_ready_i));
 
-  // Per-partition locked signal: only check the bloom filter for the current descriptor's partition.
-  assign locked        = locked_part[desc_o.patid[0+:PIDWidth]];
-  // Route grants from the partition-specific filter that received the unlock request.
-  assign w_unlock_gnt_o = w_unlock_gnt_part[w_unlock_i.patid[0+:PIDWidth]];
-  assign r_unlock_gnt_o = r_unlock_gnt_part[r_unlock_i.patid[0+:PIDWidth]];
+  // Effective patids for bloom-filter port routing.
+  // When NoPartsBF==1, all are forced to 0 so every request hits filter[0],
+  // exactly reproducing the original single shared filter.
+  assign lock_patid_bf  = (NoPartsBF == 1) ? '0 : lock.patid[0+:PIDWidthBF];
+  assign w_uf_patid_bf  = (NoPartsBF == 1) ? '0 : w_unlock_i.patid[0+:PIDWidthBF];
+  assign r_uf_patid_bf  = (NoPartsBF == 1) ? '0 : r_unlock_i.patid[0+:PIDWidthBF];
+  assign desc_patid_bf  = (NoPartsBF == 1) ? '0 : desc_o.patid[0+:PIDWidthBF];
 
-  for (genvar p = 0; unsigned'(p) < NoPartitions; p++) begin : gen_lock_box
+  assign locked         = locked_part[desc_patid_bf];
+  assign w_unlock_gnt_o = w_unlock_gnt_part[w_uf_patid_bf];
+  assign r_unlock_gnt_o = r_unlock_gnt_part[r_uf_patid_bf];
+
+  for (genvar p = 0; unsigned'(p) < NoPartsBF; p++) begin : gen_lock_box
     axi_llc_lock_box_bloom #(
       .Cfg    ( Cfg    ),
       .lock_t ( lock_t )
@@ -447,15 +460,15 @@ module axi_llc_hit_miss #(
       .clk_i,
       .rst_ni,
       .test_i,
-      .lock_i         ( lock                                                                  ),
-      .lock_req_i     ( lock_req & (lock.patid[0+:PIDWidth] == PIDWidth'(p))                 ),
-      .locked_o       ( locked_part[p]                                                        ),
-      .w_unlock_i     ( w_unlock_i                                                            ),
-      .w_unlock_req_i ( w_unlock_req_i & (w_unlock_i.patid[0+:PIDWidth] == PIDWidth'(p))     ),
-      .w_unlock_gnt_o ( w_unlock_gnt_part[p]                                                  ),
-      .r_unlock_i     ( r_unlock_i                                                            ),
-      .r_unlock_req_i ( r_unlock_req_i & (r_unlock_i.patid[0+:PIDWidth] == PIDWidth'(p))     ),
-      .r_unlock_gnt_o ( r_unlock_gnt_part[p]                                                  )
+      .lock_i         ( lock                                                       ),
+      .lock_req_i     ( lock_req & (lock_patid_bf == PIDWidthBF'(p))              ),
+      .locked_o       ( locked_part[p]                                             ),
+      .w_unlock_i     ( w_unlock_i                                                 ),
+      .w_unlock_req_i ( w_unlock_req_i & (w_uf_patid_bf == PIDWidthBF'(p))        ),
+      .w_unlock_gnt_o ( w_unlock_gnt_part[p]                                       ),
+      .r_unlock_i     ( r_unlock_i                                                 ),
+      .r_unlock_req_i ( r_unlock_req_i & (r_uf_patid_bf == PIDWidthBF'(p))        ),
+      .r_unlock_gnt_o ( r_unlock_gnt_part[p]                                       )
     );
   end
 

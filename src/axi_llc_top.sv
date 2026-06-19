@@ -751,75 +751,83 @@ endgenerate
   );
 
   // -----------------------------------------------------------------------
-  // Per-partition round-robin arbiters
+  // Per-partition round-robin arbiters  (Patch 3)
+  // Enabled when EnPartArbiter=1 AND MaxPartition>0; otherwise the four
+  // funnel points are direct wires (original FCFS behaviour).
   // -----------------------------------------------------------------------
-  // 1. Miss path: hit_miss → evict_unit
-  axi_llc_partition_arbiter #(
-    .MaxPartition ( MaxPartition ),
-    .FifoDepth    ( 32'd2        ),
-    .desc_t       ( llc_desc_t   )
-  ) i_miss_arb (
-    .clk_i,
-    .rst_ni,
-    .test_i,
-    .desc_i  ( desc           ),
-    .valid_i ( miss_valid      ),
-    .ready_o ( miss_ready      ),
-    .desc_o  ( arb_miss_desc  ),
-    .valid_o ( arb_miss_valid  ),
-    .ready_i ( arb_miss_ready  )
-  );
+  if (axi_llc_pkg::EnPartArbiter && (MaxPartition > 0)) begin : gen_part_arb
 
-  // 2. Hit bypass path: hit_miss → merge_unit bypass
-  axi_llc_partition_arbiter #(
-    .MaxPartition ( MaxPartition ),
-    .FifoDepth    ( 32'd2        ),
-    .desc_t       ( llc_desc_t   )
-  ) i_hit_arb (
-    .clk_i,
-    .rst_ni,
-    .test_i,
-    .desc_i  ( desc          ),
-    .valid_i ( hit_valid      ),
-    .ready_o ( hit_ready      ),
-    .desc_o  ( arb_hit_desc  ),
-    .valid_o ( arb_hit_valid  ),
-    .ready_i ( arb_hit_ready  )
-  );
+    // 1. Miss path: hit_miss → evict_unit
+    axi_llc_partition_arbiter #(
+      .MaxPartition ( MaxPartition ),
+      .FifoDepth    ( 32'd2        ),
+      .desc_t       ( llc_desc_t   )
+    ) i_miss_arb (
+      .clk_i,  .rst_ni,  .test_i,
+      .desc_i  ( desc          ),
+      .valid_i ( miss_valid    ),
+      .ready_o ( miss_ready    ),
+      .desc_o  ( arb_miss_desc  ),
+      .valid_o ( arb_miss_valid ),
+      .ready_i ( arb_miss_ready )
+    );
 
-  // 3. Write path: merge_unit → write_unit
-  axi_llc_partition_arbiter #(
-    .MaxPartition ( MaxPartition ),
-    .FifoDepth    ( 32'd2        ),
-    .desc_t       ( llc_desc_t   )
-  ) i_write_arb (
-    .clk_i,
-    .rst_ni,
-    .test_i,
-    .desc_i  ( write_desc       ),
-    .valid_i ( write_desc_valid  ),
-    .ready_o ( write_desc_ready  ),
-    .desc_o  ( arb_write_desc   ),
-    .valid_o ( arb_write_valid   ),
-    .ready_i ( arb_write_ready   )
-  );
+    // 2. Hit bypass path: hit_miss → merge_unit bypass
+    axi_llc_partition_arbiter #(
+      .MaxPartition ( MaxPartition ),
+      .FifoDepth    ( 32'd2        ),
+      .desc_t       ( llc_desc_t   )
+    ) i_hit_arb (
+      .clk_i,  .rst_ni,  .test_i,
+      .desc_i  ( desc         ),
+      .valid_i ( hit_valid    ),
+      .ready_o ( hit_ready    ),
+      .desc_o  ( arb_hit_desc  ),
+      .valid_o ( arb_hit_valid ),
+      .ready_i ( arb_hit_ready )
+    );
 
-  // 4. Read path: merge_unit → read_unit
-  axi_llc_partition_arbiter #(
-    .MaxPartition ( MaxPartition ),
-    .FifoDepth    ( 32'd2        ),
-    .desc_t       ( llc_desc_t   )
-  ) i_read_arb (
-    .clk_i,
-    .rst_ni,
-    .test_i,
-    .desc_i  ( read_desc       ),
-    .valid_i ( read_desc_valid  ),
-    .ready_o ( read_desc_ready  ),
-    .desc_o  ( arb_read_desc   ),
-    .valid_o ( arb_read_valid   ),
-    .ready_i ( arb_read_ready   )
-  );
+    // 3. Write path: merge_unit → write_unit
+    axi_llc_partition_arbiter #(
+      .MaxPartition ( MaxPartition ),
+      .FifoDepth    ( 32'd2        ),
+      .desc_t       ( llc_desc_t   )
+    ) i_write_arb (
+      .clk_i,  .rst_ni,  .test_i,
+      .desc_i  ( write_desc        ),
+      .valid_i ( write_desc_valid   ),
+      .ready_o ( write_desc_ready   ),
+      .desc_o  ( arb_write_desc    ),
+      .valid_o ( arb_write_valid    ),
+      .ready_i ( arb_write_ready    )
+    );
+
+    // 4. Read path: merge_unit → read_unit
+    axi_llc_partition_arbiter #(
+      .MaxPartition ( MaxPartition ),
+      .FifoDepth    ( 32'd2        ),
+      .desc_t       ( llc_desc_t   )
+    ) i_read_arb (
+      .clk_i,  .rst_ni,  .test_i,
+      .desc_i  ( read_desc         ),
+      .valid_i ( read_desc_valid    ),
+      .ready_o ( read_desc_ready    ),
+      .desc_o  ( arb_read_desc     ),
+      .valid_o ( arb_read_valid     ),
+      .ready_i ( arb_read_ready     )
+    );
+
+  end else begin : gen_direct_arb
+    // Direct connections — original FCFS ordering at every funnel point.
+    assign arb_miss_desc   = desc;           assign arb_miss_valid  = miss_valid;
+    assign miss_ready      = arb_miss_ready;
+    assign arb_hit_desc    = desc;           assign arb_hit_valid   = hit_valid;
+    assign hit_ready       = arb_hit_ready;
+    assign arb_write_desc  = write_desc;     assign arb_write_valid = write_desc_valid;
+    assign write_desc_ready = arb_write_ready;
+    assign arb_read_desc   = read_desc;      assign arb_read_valid  = read_desc_valid;
+    assign read_desc_ready  = arb_read_ready;
+  end
 
   axi_llc_evict_unit #(
     .Cfg            ( Cfg            ),
