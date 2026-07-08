@@ -96,23 +96,44 @@ module axi_llc_refill_unit #(
     .ax_chan_ready_i ( ar_chan_ready_i )
   );
 
-  stream_fifo #(
-    .FALL_THROUGH ( 1'b1                         ),
-    .DEPTH        ( axi_llc_pkg::RefillFifoDepth ),
-    .T            ( desc_t                       )
-  ) i_stream_fifo_refill (
-    .clk_i,
-    .rst_ni,
-    .flush_i   ( 1'b0          ),
-    .testmode_i( test_i        ),
-    .usage_o   ( /*not used*/  ),
-    .data_i    ( desc_ar       ),
-    .valid_i   ( desc_ar_valid ),
-    .ready_o   ( desc_ar_ready ),
-    .data_o    ( desc_r        ),
-    .valid_o   ( desc_r_valid  ),
-    .ready_i   ( desc_r_ready  )
-  );
+  if (axi_llc_pkg::DebugLLC) begin : gen_debug_refill_fifo
+    logic [$clog2(axi_llc_pkg::RefillFifoDepth+1)-1:0] usage;
+    stream_fifo #(
+      .FALL_THROUGH ( 1'b1                         ),
+      .DEPTH        ( axi_llc_pkg::RefillFifoDepth ),
+      .T            ( desc_t                       )
+    ) i_stream_fifo_refill (
+      .clk_i,
+      .rst_ni,
+      .flush_i   ( 1'b0          ),
+      .testmode_i( test_i        ),
+      .usage_o   ( usage         ),
+      .data_i    ( desc_ar       ),
+      .valid_i   ( desc_ar_valid ),
+      .ready_o   ( desc_ar_ready ),
+      .data_o    ( desc_r        ),
+      .valid_o   ( desc_r_valid  ),
+      .ready_i   ( desc_r_ready  )
+    );
+  end else begin : gen_refill_fifo
+    stream_fifo #(
+      .FALL_THROUGH ( 1'b1                         ),
+      .DEPTH        ( axi_llc_pkg::RefillFifoDepth ),
+      .T            ( desc_t                       )
+    ) i_stream_fifo_refill (
+      .clk_i,
+      .rst_ni,
+      .flush_i   ( 1'b0          ),
+      .testmode_i( test_i        ),
+      .usage_o   ( /*not used*/  ),
+      .data_i    ( desc_ar       ),
+      .valid_i   ( desc_ar_valid ),
+      .ready_o   ( desc_ar_ready ),
+      .data_o    ( desc_r        ),
+      .valid_o   ( desc_r_valid  ),
+      .ready_i   ( desc_r_ready  )
+    );
+  end
 
   axi_llc_r_master #(
     .Cfg       ( Cfg       ),

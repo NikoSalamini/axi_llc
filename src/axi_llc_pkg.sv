@@ -250,7 +250,7 @@ package axi_llc_pkg;
   /// When 1: each partition has its own counting bloom filter; the locked signal
   ///         only reflects in-flight lines of the requesting descriptor's partition.
   /// When 0: single shared bloom filter (original behaviour).
-  parameter bit EnPartBloomFilter  = 1'b1;
+  parameter bit EnPartBloomFilter  = 1'b0;
 
   /// Patch 3 — Per-partition round-robin arbiters at the four LLC funnel points
   ///            (miss path, hit bypass, write unit, read unit).
@@ -265,6 +265,17 @@ package axi_llc_pkg;
   ///         partitions never share a counter.
   /// When 0: single flat array of 2^UseIdBits counters (original behaviour).
   parameter bit EnPartReadCounter  = 1'b0;
+
+  // ---------------------------------------------------------------------------
+  // Debug instrumentation flag
+  // Set to 1'b1 to expose named usage signals on the eviction, miss-buffer,
+  // and refill FIFOs for waveform probing. Must be 0 for tape-out / synthesis.
+  // ---------------------------------------------------------------------------
+
+  /// When 1: each internal stream_fifo exposes a named `usage` signal inside a
+  ///         `gen_debug_*` generate block, visible by hierarchical path in simulation.
+  /// When 0: usage_o is left unconnected (original behaviour, zero extra logic).
+  parameter bit DebugLLC = 1'b1;
 
   /// This adds a spill register in the response path of the tag stroage unit.
   /// This should be used to achieve good timing characteristics in synthsis as the longest

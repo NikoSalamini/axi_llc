@@ -123,23 +123,44 @@ module axi_llc_evict_unit #(
   );
 
   // FIFO between AW master and W master, this many evictions transactions can be in flight
-  stream_fifo #(
-    .FALL_THROUGH ( 1'b1                        ),
-    .DEPTH        ( axi_llc_pkg::EvictFifoDepth ),
-    .T            ( desc_t                      )
-  ) i_stream_fifo_evict (
-    .clk_i,
-    .rst_ni,
-    .flush_i    ( 1'b0          ),
-    .testmode_i ( test_i        ),
-    .usage_o    ( /*not used*/  ),
-    .data_i     ( desc_aw       ),
-    .valid_i    ( desc_aw_valid ),
-    .ready_o    ( desc_aw_ready ),
-    .data_o     ( desc_w        ),
-    .valid_o    ( desc_w_valid  ),
-    .ready_i    ( desc_w_ready  )
-  );
+  if (axi_llc_pkg::DebugLLC) begin : gen_debug_evict_fifo
+    logic [$clog2(axi_llc_pkg::EvictFifoDepth+1)-1:0] usage;
+    stream_fifo #(
+      .FALL_THROUGH ( 1'b1                        ),
+      .DEPTH        ( axi_llc_pkg::EvictFifoDepth ),
+      .T            ( desc_t                      )
+    ) i_stream_fifo_evict (
+      .clk_i,
+      .rst_ni,
+      .flush_i    ( 1'b0          ),
+      .testmode_i ( test_i        ),
+      .usage_o    ( usage         ),
+      .data_i     ( desc_aw       ),
+      .valid_i    ( desc_aw_valid ),
+      .ready_o    ( desc_aw_ready ),
+      .data_o     ( desc_w        ),
+      .valid_o    ( desc_w_valid  ),
+      .ready_i    ( desc_w_ready  )
+    );
+  end else begin : gen_evict_fifo
+    stream_fifo #(
+      .FALL_THROUGH ( 1'b1                        ),
+      .DEPTH        ( axi_llc_pkg::EvictFifoDepth ),
+      .T            ( desc_t                      )
+    ) i_stream_fifo_evict (
+      .clk_i,
+      .rst_ni,
+      .flush_i    ( 1'b0          ),
+      .testmode_i ( test_i        ),
+      .usage_o    ( /*not used*/  ),
+      .data_i     ( desc_aw       ),
+      .valid_i    ( desc_aw_valid ),
+      .ready_o    ( desc_aw_ready ),
+      .data_o     ( desc_w        ),
+      .valid_o    ( desc_w_valid  ),
+      .ready_i    ( desc_w_ready  )
+    );
+  end
 
   axi_llc_w_master #(
     .Cfg       ( Cfg       ),
@@ -182,21 +203,42 @@ module axi_llc_evict_unit #(
     .flush_desc_recv_o(flush_desc_recv_o)
   );
 
-  stream_fifo #(
-    .FALL_THROUGH ( 1'b1                         ),
-    .DEPTH        ( axi_llc_pkg::MissBufferDepth ),
-    .T            ( desc_t                       )
-  ) i_stream_fifo_miss_buffer (
-    .clk_i,
-    .rst_ni,
-    .flush_i    ( 1'b0         ),
-    .testmode_i ( test_i       ),
-    .usage_o    ( /*not used*/ ),
-    .data_i     (desc_b        ),
-    .valid_i    (desc_b_valid  ),
-    .ready_o    (desc_b_ready  ),
-    .data_o     (desc_o        ),
-    .valid_o    (desc_valid_o  ),
-    .ready_i    (desc_ready_i  )
-  );
+  if (axi_llc_pkg::DebugLLC) begin : gen_debug_miss_buffer
+    logic [$clog2(axi_llc_pkg::MissBufferDepth+1)-1:0] usage;
+    stream_fifo #(
+      .FALL_THROUGH ( 1'b1                         ),
+      .DEPTH        ( axi_llc_pkg::MissBufferDepth ),
+      .T            ( desc_t                       )
+    ) i_stream_fifo_miss_buffer (
+      .clk_i,
+      .rst_ni,
+      .flush_i    ( 1'b0         ),
+      .testmode_i ( test_i       ),
+      .usage_o    ( usage        ),
+      .data_i     ( desc_b       ),
+      .valid_i    ( desc_b_valid ),
+      .ready_o    ( desc_b_ready ),
+      .data_o     ( desc_o       ),
+      .valid_o    ( desc_valid_o ),
+      .ready_i    ( desc_ready_i )
+    );
+  end else begin : gen_miss_buffer
+    stream_fifo #(
+      .FALL_THROUGH ( 1'b1                         ),
+      .DEPTH        ( axi_llc_pkg::MissBufferDepth ),
+      .T            ( desc_t                       )
+    ) i_stream_fifo_miss_buffer (
+      .clk_i,
+      .rst_ni,
+      .flush_i    ( 1'b0         ),
+      .testmode_i ( test_i       ),
+      .usage_o    ( /*not used*/ ),
+      .data_i     ( desc_b       ),
+      .valid_i    ( desc_b_valid ),
+      .ready_o    ( desc_b_ready ),
+      .data_o     ( desc_o       ),
+      .valid_o    ( desc_valid_o ),
+      .ready_i    ( desc_ready_i )
+    );
+  end
 endmodule
