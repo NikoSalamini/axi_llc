@@ -244,7 +244,7 @@ package axi_llc_pkg;
   /// When 1: each partition has its own write-miss counter so a write miss in
   ///         partition P does not stall write hits in partition Q.
   /// When 0: single shared write counter (original behaviour).
-  parameter bit EnPartWriteCounter = 1'b0;
+  parameter bit EnPartWriteCounter = 1'b1;
 
   /// Patch 2 — Per-partition bloom filter (lock-box).
   /// When 1: each partition has its own counting bloom filter; the locked signal
@@ -257,14 +257,67 @@ package axi_llc_pkg;
   /// When 1: axi_llc_partition_arbiter instances are inserted; descriptors from
   ///         different partitions are served in round-robin order.
   /// When 0: direct connections at every funnel point (original FCFS behaviour).
-  parameter bit EnPartArbiter      = 1'b0;
+  parameter bit EnPartArbiter      = 1'b1;
 
   /// Patch 4 — Per-partition per-ID read-miss counter.
   /// When 1: the 2^UseIdBits ID counters are replicated per partition so that
   ///         two transactions with the same lower ID bits but from different
   ///         partitions never share a counter.
   /// When 0: single flat array of 2^UseIdBits counters (original behaviour).
-  parameter bit EnPartReadCounter  = 1'b0;
+  parameter bit EnPartReadCounter  = 1'b1;
+
+  /** EXPERIMENTAL, CURRENTLY NOT WORKING **/
+  /// Patch 5 — Multi-slot hit/miss admission with a multi-lookup-port bloom filter
+  /// ("lane-based" admission, Approach B from the design discussion).
+  ///
+  /// *** EXPERIMENTAL. NOT YET VERIFIED IN SIMULATION. Default OFF. ***
+  ///
+  /// When 0 (default): `axi_llc_hit_miss` behaves exactly as before this patch was
+  ///         added — one descriptor resident at a time, bit-for-bit identical RTL
+  ///         path (the original single-slot logic is preserved untouched in its own
+  ///         generate branch, not merely "configured down" from the multi-slot one).
+  ///
+  /// When 1: `axi_llc_hit_miss` admits up to `NumHitMissLanes` descriptors
+  ///         concurrently instead of one ("lanes"). Today, a descriptor that hits a
+  ///         locked cache line (see the module-level doc comment on
+  ///         `axi_llc_hit_miss`) occupies the single tag-storage port until it is
+  ///         unlocked, which head-of-line-blocks every later, unrelated descriptor.
+  ///         With this patch, such a descriptor "parks" in its own lane the moment
+  ///         the tag lookup resolves — the single tag-storage port is freed right
+  ///         away regardless of lock/miss-counter stall, so a new descriptor can be
+  ///         admitted into another free lane. A round-robin arbiter
+  ///         (`rr_arb_tree`, reused) then dispatches whichever parked/newly-resolved
+  ///         lane is currently unlocked and not miss-counter-stalled.
+  ///
+  ///         What stays single-ported/unchanged, by design, to limit the risk
+  ///         surface of this patch: the tag-storage macro itself (only one lane at a
+  ///         time performs a tag lookup), the bloom filter's increment/decrement
+  ///         ports (only one lock/unlock happens per cycle), and `axi_llc_miss_counters`
+  ///         (fed from whichever lane the completion arbiter is currently considering,
+  ///         exactly mirroring how the pre-patch design fed it from the single active
+  ///         descriptor). Only the bloom filter's *lookup* side is replicated, one
+  ///         port per lane, all reading the SAME shared bucket storage — see
+  ///         `axi_llc_mp_cb_filter` for how this multi-port lookup is implemented
+  ///         without touching or forking the (git-pinned, shared) common_cells
+  ///         `cb_filter` module.
+  ///
+  ///         SPM and FLUSH descriptors also use the lane mechanism (they share the
+  ///         same admission/completion-arbitration path as normal lookups).
+  ///
+  ///         See `cheshire/CLAUDE.md`, section "EnMultilaneFilter", for the full
+  ///         design write-up, the specific correctness properties this was reasoned
+  ///         through for, and — importantly — what has *not* been verified by
+  ///         simulation and must be checked before this is trusted in real use.
+  parameter bit EnMultilaneFilter = 1'b1;
+
+  /// Number of concurrent admission lanes in `axi_llc_hit_miss` when
+  /// `EnMultilaneFilter=1` (also the number of parallel lookup ports instantiated in
+  /// the multi-lane bloom filter core, see `axi_llc_mp_cb_filter`). Ignored
+  /// (effectively 1) when `EnMultilaneFilter=0`. Must be >= 2 for the feature to have
+  /// any effect; a value of 1 degenerates to (a slower, more complex version of) the
+  /// single-slot behaviour.
+  parameter int unsigned NumHitMissLanes = 32'd4;
+  /** EXPERIMENTAL, CURRENTLY NOT WORKING **/
 
   // ---------------------------------------------------------------------------
   // Debug instrumentation flag

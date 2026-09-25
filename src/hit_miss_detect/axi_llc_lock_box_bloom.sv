@@ -19,7 +19,17 @@ module axi_llc_lock_box_bloom #(
   ///    logic [Cfg.IndexLength-1:0]      index;        // index of lock (cacheline)
   ///    logic [Cfg.SetAssociativity-1:0] way_ind;      // way which is locked
   /// } lock_t;
-  parameter type lock_t = logic
+  parameter type lock_t = logic,
+  /// Number of independent, continuously-live lookup ports.
+  /// `1` (default): structurally and behaviourally identical to this module before
+  /// `EnMultilaneFilter` was added -- still instantiates the unmodified common_cells
+  /// `cb_filter` (one lookup, one increment, one decrement port).
+  /// `>1`: switches internally to `axi_llc_mp_cb_filter` (a local re-implementation
+  /// that reuses `cb_filter`'s own `hash_block`/`counter` primitives unmodified) so
+  /// that `NumLookupPorts` independent lanes can each continuously check lock status
+  /// in parallel against the SAME shared bucket storage. Only meant to be used with
+  /// `NumLookupPorts>1` when `axi_llc_pkg::EnMultilaneFilter=1`.
+  parameter int unsigned NumLookupPorts = 32'd1
 ) (
   /// Clock, positive edge triggered
   input  logic  clk_i,
@@ -27,14 +37,20 @@ module axi_llc_lock_box_bloom #(
   input  logic  rst_ni,
   /// Testmode enable, active high
   input  logic  test_i,
-  /// Lock request payload. Performs the lookup and the lock of the line.
+  /// Lookup payload, one per port, purely combinational -> `locked_o`.
+  /// With `NumLookupPorts==1`, port 0 is expected to carry the same descriptor as
+  /// `lock_i` (its lookup and its potential lock are the same descriptor, exactly as
+  /// before this port was split out).
+  input  lock_t [NumLookupPorts-1:0] lookup_i,
+  /// This signal indicates that the lookup performed from the corresponding
+  /// `lookup_i` port found a locked cache line: another descriptor is currently
+  /// using that cacheline. Wait with asserting `lock_req_i` for that same line until
+  /// this is `'0`.
+  output logic  [NumLookupPorts-1:0] locked_o,
+  /// Lock request payload. Increments the bloom filter when `lock_req_i` is high.
   input  lock_t lock_i,
   /// Lock the line defined by `lock_i`, ie increment the bloom filter.
   input  logic  lock_req_i,
-  /// This signal indicates that the lookup performed from `lock_i` Found a locked cache line.
-  /// This means that another descriptor is currently using the cacheline.
-  /// Wait with asserting `lock_req_i` untill this is `'0`;
-  output logic  locked_o,
   /// Unlock payload from the write unit.
   input  lock_t w_unlock_i,
   /// Unlock request from the write unit is valid.
@@ -51,8 +67,10 @@ module axi_llc_lock_box_bloom #(
   localparam int unsigned DataWidth = Cfg.SetAssociativity + Cfg.IndexLength;
 
   // signals to the bloom filter
-  logic [DataWidth-1:0] look_data,  incr_data,  decr_data;
-  logic                 look_valid,             decr_valid;
+  logic [NumLookupPorts-1:0][DataWidth-1:0] look_data;
+  logic [NumLookupPorts-1:0]                look_valid;
+  logic [DataWidth-1:0] incr_data,  decr_data;
+  logic                             decr_valid;
   logic                 full,       error;
   // decrement FIFOs signals
   logic [DataWidth-1:0] w_decr_inp, r_decr_inp;
@@ -64,7 +82,9 @@ module axi_llc_lock_box_bloom #(
   logic                 w_gnt,      r_gnt;      // grant signals from arbitration tree
 
   // bloom input connections
-  assign look_data  = {lock_i.index,     lock_i.way_ind};
+  for (genvar l = 0; unsigned'(l) < NumLookupPorts; l++) begin : gen_look_data
+    assign look_data[l] = {lookup_i[l].index, lookup_i[l].way_ind};
+  end
   assign incr_data  = {lock_i.index,     lock_i.way_ind};
   assign w_decr_inp = {w_unlock_i.index, w_unlock_i.way_ind};
   assign r_decr_inp = {r_unlock_i.index, r_unlock_i.way_ind};
@@ -134,34 +154,68 @@ module axi_llc_lock_box_bloom #(
   // Safety for if for some reason the data width is not bigger than the hash width in `llc_pkg`.
   localparam int unsigned HashWidth = (DataWidth > axi_llc_pkg::BloomHashWidth) ?
                                       axi_llc_pkg::BloomHashWidth : (DataWidth - 1);
-  cb_filter #(
-    .KHashes     ( axi_llc_pkg::BloomKHashes     ),
-    .HashWidth   ( HashWidth                     ),
-    .HashRounds  ( axi_llc_pkg::BloomHashRounds  ),
-    .InpWidth    ( DataWidth                     ),
-    .BucketWidth ( axi_llc_pkg::BloomBucketWidth ),
-    .Seeds       ( axi_llc_pkg::BloomSeeds       )
-  ) i_cb_filter(
-    .clk_i,   // Clock
-    .rst_ni,  // Active low reset
-    // data lookup
-    .look_data_i    ( look_data  ),
-    .look_valid_o   ( look_valid ),
-    // data increment
-    .incr_data_i    ( incr_data  ),
-    .incr_valid_i   ( lock_req_i ),
-    // data decrement
-    .decr_data_i    ( decr_data  ),
-    .decr_valid_i   ( decr_valid ),
-    // status signals
-    .filter_clear_i  ( 1'b0  ),
-    .filter_usage_o  (       ),
-    .filter_full_o   ( full  ),
-    .filter_empty_o  (       ),
-    .filter_error_o  ( error )
-  );
+
+  if (NumLookupPorts == 32'd1) begin : gen_single_port_filter
+    // Default / non-experimental path: unmodified common_cells `cb_filter`, exactly
+    // as before `EnMultilaneFilter` was added.
+    cb_filter #(
+      .KHashes     ( axi_llc_pkg::BloomKHashes     ),
+      .HashWidth   ( HashWidth                     ),
+      .HashRounds  ( axi_llc_pkg::BloomHashRounds  ),
+      .InpWidth    ( DataWidth                     ),
+      .BucketWidth ( axi_llc_pkg::BloomBucketWidth ),
+      .Seeds       ( axi_llc_pkg::BloomSeeds       )
+    ) i_cb_filter (
+      .clk_i,   // Clock
+      .rst_ni,  // Active low reset
+      // data lookup
+      .look_data_i    ( look_data[0]  ),
+      .look_valid_o   ( look_valid[0] ),
+      // data increment
+      .incr_data_i    ( incr_data  ),
+      .incr_valid_i   ( lock_req_i ),
+      // data decrement
+      .decr_data_i    ( decr_data  ),
+      .decr_valid_i   ( decr_valid ),
+      // status signals
+      .filter_clear_i  ( 1'b0  ),
+      .filter_usage_o  (       ),
+      .filter_full_o   ( full  ),
+      .filter_empty_o  (       ),
+      .filter_error_o  ( error )
+    );
+  end else begin : gen_multi_port_filter
+    // EnMultilaneFilter=1 path: local multi-lookup-port core, see
+    // axi_llc_mp_cb_filter.sv for the rationale.
+    axi_llc_mp_cb_filter #(
+      .NumLookupPorts ( NumLookupPorts                ),
+      .KHashes        ( axi_llc_pkg::BloomKHashes     ),
+      .HashWidth      ( HashWidth                     ),
+      .HashRounds     ( axi_llc_pkg::BloomHashRounds  ),
+      .InpWidth       ( DataWidth                     ),
+      .BucketWidth    ( axi_llc_pkg::BloomBucketWidth ),
+      .Seeds          ( axi_llc_pkg::BloomSeeds       )
+    ) i_mp_cb_filter (
+      .clk_i,
+      .rst_ni,
+      .look_data_i    ( look_data  ),
+      .look_valid_o   ( look_valid ),
+      .incr_data_i    ( incr_data  ),
+      .incr_valid_i   ( lock_req_i ),
+      .decr_data_i    ( decr_data  ),
+      .decr_valid_i   ( decr_valid ),
+      .filter_clear_i  ( 1'b0  ),
+      .filter_usage_o  (       ),
+      .filter_full_o   ( full  ),
+      .filter_empty_o  (       ),
+      .filter_error_o  ( error )
+    );
+  end
+
   // output assignment
-  assign locked_o = look_valid | full;
+  for (genvar l = 0; unsigned'(l) < NumLookupPorts; l++) begin : gen_locked_out
+    assign locked_o[l] = look_valid[l] | full;
+  end
 
   // pragma translate_off
   `ifndef VERILATOR
